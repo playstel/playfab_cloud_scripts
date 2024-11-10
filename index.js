@@ -10,8 +10,269 @@ var PROGRESSIVE_REWARD_TABLE = "ProgressiveRewardTable";	// TitleData key that c
 var PROGRESSIVE_MIN_CREDITS = "MinStreak";					// PROGRESSIVE_REWARD_TABLE property denoting the minium number of logins to be eligible for this item 
 var PROGRESSIVE_REWARD = "Reward";							// PROGRESSIVE_REWARD_TABLE property denoting what item gets rewarded at this level
 var TRACKER_NEXT_GRANT = "NextEligibleGrant";				// CHECK_IN_TRACKER property containing the time at which we 
-var TRACKER_LOGIN_STREAK = "LoginStreak";					// CHECK_IN_TRACKER property containing the streak length
+var TRACKER_LOGIN_STREAK = "LoginStreak";					// CHECK_IN_TRACKER property containing the streak length		
 
+// reward containers	
+var REWARD_LOGIN_CATALOG_VERSION = "Support"; 
+var REWARD_LOGIN_FIRST = "Chest_Login_First";
+var REWARD_LOGIN_DAILY = "Chest_Login_Daily";
+var REWARD_LOGIN_WEEKLY = "Chest_Login_Weekly";
+
+var REWARD_LEVEL_CATALOG_VERSION = "Market"; 
+var REWARD_LEVEL_ID = "Chest_Level";
+var REWARD_LEVEL_ID_UNCOMMON = "Chest_Level_Uncommon";
+
+handlers.CheckLastRoundStars = function(args)
+{
+	var GetUserReadOnlyDataRequest = {
+        "PlayFabId": currentPlayerId,
+        "Keys": [ ROUND_STARS_KEY ]
+    }; 
+
+    var GetUserReadOnlyDataResponse = server.GetUserReadOnlyData(GetUserReadOnlyDataRequest);
+    
+    var lastRoundStars = 0;
+
+    if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(ROUND_STARS_KEY))
+    {
+    	lastRoundStars = GetUserReadOnlyDataResponse.Data[ROUND_STARS_KEY].Value;
+    }
+
+    var unpackedRewardIds = [ REWARD_LEVEL_ID, REWARD_LEVEL_ID_UNCOMMON ];
+
+    var unpackedRewardIdsChecked = CheckInventoryItems(unpackedRewardIds);
+
+    return {"LastRoundStars":lastRoundStars, "UnpackedRewards":unpackedRewardIdsChecked };
+}
+
+handlers.CheckAcceptedInvitations = function(args)
+{
+	var GetUserReadOnlyDataRequest = 
+    {
+        "PlayFabId": currentPlayerId,
+        "Keys": [ PLAYER_REFERRAL_TEMPORARY_KEY ]
+    }; 
+    
+    var GetUserReadOnlyDataResult = server.GetUserReadOnlyData(GetUserReadOnlyDataRequest);
+
+    var acceptedInvitations = [];
+    var addedCurrencyAmount = 0;
+    
+    if(GetUserReadOnlyDataResult.Data.hasOwnProperty(PLAYER_REFERRAL_TEMPORARY_KEY))
+    {
+        acceptedInvitations = JSON.parse(GetUserReadOnlyDataResult.Data[PLAYER_REFERRAL_TEMPORARY_KEY].Value);
+        
+        if(Array.isArray(acceptedInvitations))
+        {
+            if(args.TakeReward)
+            {
+                var rewardAmount = 0;
+                
+                if(acceptedInvitations.length > 0)
+                {
+                    rewardAmount = acceptedInvitations.length * VIRTUAL_CURRENCY_AMOUNT;
+                    addedCurrencyAmount = AddCurrency(rewardAmount, VIRTUAL_CURRENCY_CODE);
+                }
+
+                RemoveTemporaryReferralData();
+            }
+        }
+    }
+    
+    return {"AcceptedInvitations": acceptedInvitations, "RewardAmount": addedCurrencyAmount, "RewardCurrency": VIRTUAL_CURRENCY_CODE };
+}
+
+handlers.CheckDailyReward = function(args) {
+
+	var GetUserReadOnlyDataRequest = {
+        "PlayFabId": currentPlayerId,
+        "Keys": [ CHECK_IN_TRACKER ]
+    }; 
+    
+    var GetUserReadOnlyDataResponse = server.GetUserReadOnlyData(GetUserReadOnlyDataRequest);
+    
+    var tracker = {}; // this would be the first login ever (across any title), so we have to make sure our record exists.
+    
+    var loginStreak = 0;
+    var nextGrant = 0;
+    
+    if(!GetUserReadOnlyDataResponse.Data.hasOwnProperty(CHECK_IN_TRACKER)) // first daily reward
+    {
+    	tracker = ResetTracker();
+  		
+  		// write back updated data to PlayFab
+  		UpdateTrackerData(tracker);
+        
+        // streak continues
+		//loginStreak += 1;
+		
+        if(loginStreak > 7) loginStreak = 1;
+		
+		var dateObj = new Date(Date.now());
+		//dateObj.setDate(dateObj.getDate() + 1); // add one day 
+		dateObj.setDate(dateObj.getDate()); // this day 
+		nextGrant = dateObj.getTime();
+		
+		UpdateTrackerDataManual(loginStreak, nextGrant);
+		
+        return {"currentStreak":loginStreak,"dailyBonus":true,"message":"First login"};
+    }
+
+    tracker = GetUserReadOnlyDataResponse.Data[CHECK_IN_TRACKER].Value;
+    
+    if(tracker != null)
+    {
+        var values = tracker.split(';');
+        
+        if(values[0] != NaN)
+        {
+            loginStreak = parseInt(values[0]);
+        }
+        
+        nextGrant = parseInt(values[1]);
+    }
+
+	if(Date.now() > nextGrant)
+	{	
+		var timeWindow = new Date(nextGrant);
+        
+		timeWindow.setDate(timeWindow.getDate() + 1); // add 1 day 
+
+        // // more than 24 h since the last grant
+		// if(Date.now() > timeWindow.getTime())
+		// {
+        //     return {"message":"Daily streak has been broken"};
+		// }
+
+        // more than 24 h since the last grant
+		if(Date.now() > timeWindow.getTime())
+		{
+			tracker = ResetTracker();
+		    UpdateTrackerData(tracker);
+        
+            return {"currentStreak":loginStreak,"dailyBonus": false,"message":"Daily streak has been broken", "pickedReward": null,"nextGrant":nextGrant};
+		}
+
+        // less than 24 h since the last grant
+		// streak continues
+		loginStreak += 1;
+		
+        if(loginStreak > 7) loginStreak = 1;
+		
+		var dateObj = new Date(Date.now());
+		dateObj.setDate(dateObj.getDate() + 1); // add one day 
+		nextGrant = dateObj.getTime();
+
+        return {"currentStreak":loginStreak,"dailyBonus":true,"message":"Daily bonus is ready","nextGrant":nextGrant};
+	}
+
+	var timeWindow = new Date(nextGrant);
+	var nextGrant =	timeWindow.setDate(timeWindow.getDate()); // add 1 day 
+
+    return {"currentStreak":loginStreak,"message":"Daily bonus is not ready yet","nextGrant":nextGrant};
+};
+
+handlers.GetDailyReward = function(args) {
+
+	var GetUserReadOnlyDataRequest = {
+        "PlayFabId": currentPlayerId,
+        "Keys": [ CHECK_IN_TRACKER ]
+    }; 
+    
+    var GetUserReadOnlyDataResponse = server.GetUserReadOnlyData(GetUserReadOnlyDataRequest);
+    
+    var tracker = {}; // this would be the first login ever (across any title), so we have to make sure our record exists.
+    
+    var loginStreak = 0;
+    var nextGrant = 0;
+    
+    if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(CHECK_IN_TRACKER))
+    {
+    	tracker = GetUserReadOnlyDataResponse.Data[CHECK_IN_TRACKER].Value;
+    }
+    else // first daily reward
+    {
+    	tracker = ResetTracker();
+  		
+  		// write back updated data to PlayFab
+  		UpdateTrackerData(tracker);
+        
+        // streak continues
+		loginStreak += 1;
+		
+        if(loginStreak > 7) loginStreak = 1;
+		
+		var dateObj = new Date(Date.now());
+		dateObj.setDate(dateObj.getDate() + 1); // add one day 
+		nextGrant = dateObj.getTime();
+		
+		UpdateTrackerDataManual(loginStreak, nextGrant);
+		
+		var pickedReward = [];
+
+        pickedReward = GrandDailyReward(loginStreak);
+		
+        return {"currentStreak":loginStreak,"dailyBonus":false,"message":"Daily reward granted!", "pickedReward": pickedReward,"nextGrant":nextGrant};
+    }
+
+    if(tracker != null)
+    {
+        var values = tracker.split(';');
+        
+        if(values[0] != NaN)
+        {
+            loginStreak = parseInt(values[0]);
+        }
+        
+        nextGrant = parseInt(values[1]);
+    }
+
+	if(Date.now() > nextGrant)
+	{	
+		var timeWindow = new Date(nextGrant);
+        
+		timeWindow.setDate(timeWindow.getDate() + 1); // add 1 day 
+
+        // more than 24 h since the last grant
+		if(Date.now() > timeWindow.getTime())
+		{
+			tracker = ResetTracker();
+		    UpdateTrackerData(tracker);
+        
+            return {"currentStreak":loginStreak,"dailyBonus": false,"message":"Daily streak has been broken", "pickedReward": null,"nextGrant":nextGrant};
+		}
+
+        // less than 24 h since the last grant
+		// streak continues
+		loginStreak += 1;
+		
+        if(loginStreak > 7) loginStreak = 1;
+		
+		var dateObj = new Date(Date.now());
+		dateObj.setDate(dateObj.getDate() + 1); // add one day 
+		nextGrant = dateObj.getTime();
+		
+		UpdateTrackerDataManual(loginStreak, nextGrant);
+		
+        pickedReward = GrandDailyReward(loginStreak);
+
+        return {"currentStreak":loginStreak,"dailyBonus": false,"message":"Daily reward granted!", "pickedReward": pickedReward,"nextGrant":nextGrant};
+	}
+
+	var timeWindow = new Date(nextGrant);
+	var nextGrant =	timeWindow.setDate(timeWindow.getDate());
+    
+    return {"currentStreak":loginStreak,"dailyBonus": false,"message":"Daily bonus is not ready yet", "pickedReward": null,"nextGrant":nextGrant};
+};
+
+function GrandDailyReward(Streak) 
+{
+    var dailyRewardChestId = REWARD_LOGIN_DAILY;
+
+    if(Streak == 7) dailyRewardChestId = REWARD_LOGIN_WEEKLY;
+
+    return GrantItems(dailyRewardChestId, REWARD_LOGIN_CATALOG_VERSION);
+}
 
 handlers.CheckIn = function(args) {
 
@@ -20,7 +281,7 @@ handlers.CheckIn = function(args) {
 
 	var GetUserReadOnlyDataRequest = {
         "PlayFabId": currentPlayerId,
-        "Keys": [ CHECK_IN_TRACKER, AD_WATCH_KEY, ADDRESSABLES_VERSION_KEY, AD_STREAK_KEY ]
+        "Keys": [ CHECK_IN_TRACKER, AD_WATCH_KEY, ADDRESSABLES_VERSION_KEY, AD_STREAK_KEY, ROUND_STARS_KEY ]
     }; 
     
     var GetUserReadOnlyDataResponse = server.GetUserReadOnlyData(GetUserReadOnlyDataRequest);
@@ -33,6 +294,11 @@ handlers.CheckIn = function(args) {
     var starsStreak = 0;
     var loginStreak = 0;
     var nextGrant = 0;
+    var lastRoundStars = 0;
+
+    var unpackedRewardIds = [ REWARD_LEVEL_ID, REWARD_LEVEL_ID_UNCOMMON ];
+
+    var unpackedRewardIdsChecked = CheckInventoryItems(unpackedRewardIds);
     
     if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(AD_STREAK_KEY))
     {
@@ -50,6 +316,11 @@ handlers.CheckIn = function(args) {
     {
     	addressablesVersion = GetUserReadOnlyDataResponse.Data[ADDRESSABLES_VERSION_KEY].Value;
     }
+
+    if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(ROUND_STARS_KEY))
+    {
+    	lastRoundStars = GetUserReadOnlyDataResponse.Data[ROUND_STARS_KEY].Value;
+    }
     
     if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(CHECK_IN_TRACKER))
     {
@@ -64,7 +335,7 @@ handlers.CheckIn = function(args) {
   		UpdateTrackerData(tracker);
   		
         GrantItems("Gold Start", "Support");
-        
+        GrantItems(REWARD_LOGIN_FIRST, REWARD_LEVEL_CATALOG_VERSION);
         
         // streak continues
 		loginStreak += 1;
@@ -85,11 +356,7 @@ handlers.CheckIn = function(args) {
 		
         return {"currentStreak":loginStreak,"dailyBonus":true,"message":"Daily and first login bonuses is ready!", 
     	    "firstLoginBonus": true,"newReferralsIds":newReferralsIds, "referralMark":referralMark, "ad":ad, 
-    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak };
-
-    // 	return {"currentStreak":tracker[TRACKER_LOGIN_STREAK],"dailyBonus":false,"message":"This was your first login!", 
-    // 	    "firstLoginBonus": true,"newReferralsIds":newReferralsIds, "referralMark":referralMark, "ad":ad, 
-    // 	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak };
+    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak, "lastRoundStars":lastRoundStars, "unpackedRewards":unpackedRewardIdsChecked };
     }
 
     if(tracker != null)
@@ -121,7 +388,7 @@ handlers.CheckIn = function(args) {
         
     	    return {"currentStreak":loginStreak,"dailyBonus":false,"message":"Your daily bonus streak has been broken", 
     	    "firstLoginBonus": false,"newReferralsIds":newReferralsIds, "referralMark":referralMark, "ad":ad, 
-    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak };
+    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak, "lastRoundStars":lastRoundStars, "unpackedRewards":unpackedRewardIdsChecked };
 		}
 
 		// streak continues
@@ -143,12 +410,12 @@ handlers.CheckIn = function(args) {
 		
         return {"currentStreak":loginStreak,"dailyBonus":true,"message":"Daily bonus is ready!", 
     	    "firstLoginBonus": false,"newReferralsIds":newReferralsIds, "referralMark":referralMark, "ad":ad, 
-    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak };
+    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak, "lastRoundStars":lastRoundStars, "unpackedRewards":unpackedRewardIdsChecked };
 	}
 
     return {"currentStreak":loginStreak,"dailyBonus":false,"message":"Daily bonus is not ready yet!", 
     	    "firstLoginBonus": false,"newReferralsIds":newReferralsIds, "referralMark":referralMark, "ad":ad, 
-    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak };
+    	    "addressablesVersion" : addressablesVersion, "starsStreak":starsStreak, "lastRoundStars":lastRoundStars, "unpackedRewards":unpackedRewardIdsChecked };
 };
 
 function SetBonus(Streak) 
@@ -163,7 +430,7 @@ function SetBonus(Streak)
     }
     
     GrantItems(bonusName, "Support");
-        
+
     return bonusName;
 }
 
@@ -183,6 +450,20 @@ function UpdateTrackerData(data)
         "Data": {}
     };
     UpdateUserReadOnlyDataRequest.Data[CHECK_IN_TRACKER] = data;
+
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
+}
+
+function RemoveLastMatchStars()
+{
+    var UpdateUserReadOnlyDataRequest = {
+        "PlayFabId": currentPlayerId,
+        "Data": {}
+    };
+
+    // UpdateUserReadOnlyDataRequest.Data[REWARD_LEVEL_KEY] = 0;
+    // UpdateUserReadOnlyDataRequest.Data[REWARD_CUP_KEY] = "false";
+    UpdateUserReadOnlyDataRequest.Data[ROUND_STARS_KEY] = 0;
 
     server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
 }
@@ -282,6 +563,7 @@ function CheckReferralMark()
     return 0;
 }
 
+
 //////////////////////////////////////////////////////////////////////////////////////////
 //
 //  Referral Programm
@@ -289,10 +571,10 @@ function CheckReferralMark()
 //////////////////////////////////////////////////////////////////////////////////////////
 
 var VIRTUAL_CURRENCY_CODE = "GL";
-var VIRTUAL_CURRENCY_AMOUNT = 1000;
+var VIRTUAL_CURRENCY_AMOUNT = 500;
 var PLAYER_REFERRAL_KEY = "Referral";
 var PLAYER_REFERRAL_TEMPORARY_KEY = "ReferralTemporary";
-var MAXIMUM_REFERRALS = 5;
+var MAXIMUM_REFERRALS = 10;
 var REFERRAL_BONUS_BUNDLE = "ReferralPack";
 var REFERRAL_MARK = "ReferralMark";
 var CATALOG_VERSION_REF = "Setup";
@@ -418,7 +700,6 @@ handlers.RedeemReferral = function(args) {
         return e;
     }
 };
-
 
 function GrantReferralBonus()
 {
@@ -558,6 +839,36 @@ handlers.UpdateMainCurrency = function(args) {
     return SubstractItemPrice(substractedValue, "GL");
 }
 
+handlers.SubstractMainCurrency = function(args) {
+
+    var userCurrency = GetUserCurrency("GL");
+    var itemPrice = args.NewCurrencyValue;
+    
+    if (itemPrice > userCurrency)
+    {
+        return null;
+    }
+    
+    SubstractItemPrice(itemPrice, "GL");
+
+    return itemPrice;
+}
+
+handlers.SubstractGemsCurrency = function(args) {
+
+    var userCurrency = GetUserCurrency("DM");
+    var itemPrice = args.NewCurrencyValue;
+    
+    if (itemPrice > userCurrency)
+    {
+        return null;
+    }
+    
+    SubstractItemPrice(itemPrice, "DM");
+
+    return itemPrice;
+}
+
 function GetUserCurrency(Currency)
 {
     var request = { "InfoRequestParameters": { "GetUserVirtualCurrency": true }, "PlayFabId": currentPlayerId };
@@ -569,12 +880,13 @@ function AddCurrency(Value, Currency)
 {
     server.AddUserVirtualCurrency({PlayFabId: currentPlayerId, 
     VirtualCurrency: Currency, Amount: Value});
+
+    return Value;
 }
 
 function SubstractItemPrice(Value, Currency)
 {
-    server.SubtractUserVirtualCurrency({PlayFabId: currentPlayerId, 
-    VirtualCurrency: Currency, Amount: Value});
+    server.SubtractUserVirtualCurrency({PlayFabId: currentPlayerId, VirtualCurrency: Currency, Amount: Value});
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -677,9 +989,6 @@ var SKIN_START_VALUE = "Material_Chr_01_A";
 var DEFAULT_ITEMS_CATALOG = "Character";
 var DEFAULT_ITEMS_PACK = "Default Characters";
 
-var DEFAULT_ITEMS_CATALOG_2 = "Market";
-var DEFAULT_ITEMS_PACK_2 = "Default Character";
-
 var DEFAULT_ITEMS_DATA_KEY = "Items";
 var DEFAULT_ITEMS_DATA_VALUE = "Cool_Male_Hair_01;Cool Male;";
 
@@ -687,6 +996,13 @@ var DISABLE_AD_KEY = "Disable Ads";
 var DISABLE_AD_VALUE_DEFAULT = "false";
 var DISABLE_AD_VALUE_PURCHASED = "true";
 
+var REWARD_CUP_KEY = "RewardCup";
+var REWARD_CUP_VALUE_DISABLED = "false";
+
+var REWARD_LEVEL_KEY = "RewardLevel";
+var REWARD_LEVEL_VALUE_DISABLED = "false";
+
+// obsoleted
 handlers.CreateDefaultPlayerData = function(args)
 { 
     var updatePlayerStatisticsRequest = { PlayFabId: currentPlayerId, Statistics: [
@@ -694,26 +1010,36 @@ handlers.CreateDefaultPlayerData = function(args)
         { StatisticName: "Frags", Value: 0 },
         { StatisticName: "Deaths", Value: 0 },
         { StatisticName: "Referrals", Value: 0 },
+        { StatisticName: "Laurels", Value: 0 },
         { StatisticName: "Cups", Value: 0 },
+        { StatisticName: "Level", Value: 0 },
         { StatisticName: "GameTime", Value: 0 }
         ]
     };
              
     server.UpdatePlayerStatistics(updatePlayerStatisticsRequest);
     
-    var UpdateUserDataRequest = 
+    var UpdateUserReadOnlyDataRequest = 
     {
         "PlayFabId": currentPlayerId,
         "Data": {},
         "Permission": "Public"
     };
     
-    UpdateUserDataRequest.Data[NEWLY_STATUS_KEY] = NEWLY_STATUS_VALUE;
-    UpdateUserDataRequest.Data[DEFAULT_ITEMS_DATA_KEY] = DEFAULT_ITEMS_DATA_VALUE;
-    UpdateUserDataRequest.Data[SKIN_KEY] = SKIN_START_VALUE;
-    UpdateUserDataRequest.Data[DISABLE_AD_KEY] = DISABLE_AD_VALUE_DEFAULT;
+    UpdateUserReadOnlyDataRequest.Data[NEWLY_STATUS_KEY] = NEWLY_STATUS_VALUE;
+    UpdateUserReadOnlyDataRequest.Data[DEFAULT_ITEMS_DATA_KEY] = DEFAULT_ITEMS_DATA_VALUE;
+    UpdateUserReadOnlyDataRequest.Data[SKIN_KEY] = SKIN_START_VALUE;
+    UpdateUserReadOnlyDataRequest.Data[DISABLE_AD_KEY] = DISABLE_AD_VALUE_DEFAULT;
+    UpdateUserReadOnlyDataRequest.Data[SKIN_KEY] = SKIN_START_VALUE;
+    UpdateUserReadOnlyDataRequest.Data[DISABLE_AD_KEY] = DISABLE_AD_VALUE_DEFAULT;
+
+    UpdateUserReadOnlyDataRequest.Data[REWARD_LEVEL_KEY] = REWARD_LEVEL_VALUE_DISABLED;
+    UpdateUserReadOnlyDataRequest.Data[REWARD_CUP_KEY] = REWARD_CUP_VALUE_DISABLED;
+
+    UpdateUserReadOnlyDataRequest.Data[ROUND_STARS_KEY] = ROUND_STARS_VALUE;
+    UpdateUserReadOnlyDataRequest.Data[LEVEL_STARS_KEY] = LEVEL_STARS_VALUE;
     
-    server.UpdateUserData(UpdateUserDataRequest);
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
     
     GrantItems(DEFAULT_ITEMS_PACK, DEFAULT_ITEMS_CATALOG); // delete after update
     GrantItems(DEFAULT_ITEMS_PACK_2, DEFAULT_ITEMS_CATALOG_2); // rename after update
@@ -721,10 +1047,78 @@ handlers.CreateDefaultPlayerData = function(args)
     StartGoldPack();
 }
 
+var DEFAULT_HEROES_CATALOG = "Market";
+var DEFAULT_HEROES_PACK = "Default Characters";
+
+var LEVEL_STARS_LIMIT_KEY = "LevelStarsLimit";
+var LEVEL_STARS_LIMIT_VALUE = 1500;
+
+handlers.CreateDefaultProfile = function(args)
+{ 
+    var updatePlayerStatisticsRequest = { PlayFabId: currentPlayerId, Statistics: [
+        { StatisticName: "Matches", Value: 0 },
+        { StatisticName: "Frags", Value: 0 },
+        { StatisticName: "Deaths", Value: 0 },
+        { StatisticName: "Referrals", Value: 0 },
+        { StatisticName: "Laurels", Value: 0 },
+        { StatisticName: "Level", Value: 1 },
+        { StatisticName: "MaxStars", Value: 0 },
+        { StatisticName: "Age", Value: 0 }
+        ]
+    };
+             
+    server.UpdatePlayerStatistics(updatePlayerStatisticsRequest);
+    
+    var UpdateUserReadOnlyDataRequest = 
+    {
+        "PlayFabId": currentPlayerId,
+        "Data": {},
+        "Permission": "Public"
+    };
+    
+    UpdateUserReadOnlyDataRequest.Data[NEWLY_STATUS_KEY] = NEWLY_STATUS_VALUE;
+    UpdateUserReadOnlyDataRequest.Data[SKIN_KEY] = SKIN_START_VALUE;
+    UpdateUserReadOnlyDataRequest.Data[LEVEL_STARS_LIMIT_KEY] = LEVEL_STARS_LIMIT_VALUE;
+    
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
+
+    return GrantItems(DEFAULT_HEROES_PACK, DEFAULT_HEROES_CATALOG);
+}
+
+handlers.SaveUserAge = function(args)
+{
+    var updatePlayerStatisticsRequest = { PlayFabId: currentPlayerId, Statistics: [ { StatisticName: "Age", Value: args.UserAge } ] };
+
+    server.UpdatePlayerStatistics(updatePlayerStatisticsRequest);
+}
+
+handlers.ConvertCupsToLevels = function(args)
+{
+    var playerCups = 0;
+
+    var playerStats = server.GetPlayerStatistics({PlayFabId: currentPlayerId}).Statistics;
+
+    for (var i = 0; i < playerStats.length; i++)
+    {
+        if (playerStats[i].StatisticName === "Cups") playerCups = playerStats[i].Value;
+    }
+
+    if(playerCups > 0)
+    {
+        var updatePlayerStatisticsRequest = { PlayFabId: currentPlayerId, Statistics: 
+        [ 
+            { StatisticName: "Level", Value: playerCups },
+            { StatisticName: "Laurels", Value: playerCups },
+        ] };
+
+        server.UpdatePlayerStatistics(updatePlayerStatisticsRequest);
+    }
+}
+
 var PICKED_ITEMS_KEY = "PickedItems";
 handlers.SetPickedItems = function(args)
 { 
-    var UpdateUserDataRequest = 
+    var UpdateUserReadOnlyDataRequest = 
     {
         "PlayFabId": currentPlayerId,
         "Data": {},
@@ -732,9 +1126,9 @@ handlers.SetPickedItems = function(args)
         "Permission": "Public"
     };
     
-    UpdateUserDataRequest.Data[PICKED_ITEMS_KEY] = args.PickedItems;
+    UpdateUserReadOnlyDataRequest.Data[PICKED_ITEMS_KEY] = args.PickedItems;
     
-    server.UpdateUserData(UpdateUserDataRequest);
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
 }
 
 
@@ -763,18 +1157,18 @@ handlers.SetCharacterToUser = function(args)
         }
     }
     
-    var UpdateUserDataRequest = 
+    var UpdateUserReadOnlyDataRequest = 
     {
         "PlayFabId": currentPlayerId,
         "Data": {},
         "Permission": "Public"
     };
     
-    UpdateUserDataRequest.Data[NEWLY_STATUS_KEY] = "False";
-    UpdateUserDataRequest.Data[SKIN_KEY] = args.SkinValue;
-    UpdateUserDataRequest.Data[ITEMS_KEY] = savingItems;
+    UpdateUserReadOnlyDataRequest.Data[NEWLY_STATUS_KEY] = "False";
+    UpdateUserReadOnlyDataRequest.Data[SKIN_KEY] = args.SkinValue;
+    UpdateUserReadOnlyDataRequest.Data[ITEMS_KEY] = savingItems;
     
-    server.UpdateUserData(UpdateUserDataRequest);
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -879,7 +1273,25 @@ function GetPlayerDataValue(key)
             PlayFabId: currentPlayerId,
             Keys: [ key ],
         });
+    
+    if(getPlayerInfo == null || getPlayerInfo.Data[key] == null) 
+    {
+        return GetPlayerReadonlyDataValue(key);
+    }
+    
+    return getPlayerInfo.Data[key].Value;
+}
+
+function GetPlayerReadonlyDataValue(key) 
+{
+    var getPlayerInfo = server.GetUserReadOnlyData
+        ({
+            PlayFabId: currentPlayerId,
+            Keys: [ key ],
+        });
         
+    if(getPlayerInfo == null || getPlayerInfo.Data[key] == null) return null;
+    
     return getPlayerInfo.Data[key].Value;
 }
 
@@ -1137,4 +1549,230 @@ handlers.SetAddressablesVersion = function (args)
     UpdateUserReadOnlyDataRequest.Data[ADDRESSABLES_VERSION_KEY] = args.Version;
     
     server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//
+//  Account confirmation
+//
+////////////////////////////////////////////////////////////////////////////////////////// 
+
+var USER_ITEMS_DATA_KEY = "Items";
+
+handlers.AccountConfirmation = function (args) 
+{
+    var UpdateUserReadOnlyDataRequest = 
+    {
+        "PlayFabId": currentPlayerId,
+        "Data": {},
+        "Permission": "Public"
+    };
+    
+    UpdateUserReadOnlyDataRequest.Data[USER_ITEMS_DATA_KEY] = args.Items;
+    UpdateUserReadOnlyDataRequest.Data[SKIN_KEY] = args.Skin;
+    
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
+    
+    return true;
+}
+
+handlers.AddPlayerTag = function (args) 
+{
+    var AddPlayerTagRequest = 
+    {
+        "PlayFabId": currentPlayerId,
+        "TagName": args.TagName
+    };
+    
+    server.AddPlayerTag(AddPlayerTagRequest);
+}
+
+handlers.RemovePlayerTag = function (args) 
+{
+    var RemovePlayerTagRequest = 
+    {
+        "PlayFabId": currentPlayerId,
+        "TagName": args.TagName
+    };
+    
+    server.RemovePlayerTag(RemovePlayerTagRequest);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//
+//  Match score & level rewards
+//
+//////////////////////////////////////////////////////////////////////////////////////////
+
+var ROUND_STARS_KEY = "RoundStars";
+var ROUND_STARS_VALUE = 0;
+
+var LEVEL_STARS_KEY = "LevelStars";
+var LEVEL_STARS_VALUE = 0;
+
+handlers.UpdateScoreAfterMatch = function(args)
+{   
+    var roundStars = args.RoundStars;
+    
+    var UpdateUserReadOnlyDataRequest = 
+    {
+        "PlayFabId": currentPlayerId,
+        "Data": {},
+        "Permission": "Private"
+    };
+
+    UpdateUserReadOnlyDataRequest.Data[ROUND_STARS_KEY] = roundStars;
+
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
+
+    // STATISTICS RECORD:
+
+    var playerLaurel = args.Laurel;
+    if (playerLaurel > 1) playerLaurel = 0;
+
+    var playerFrags = args.Frags;
+    if (playerFrags > 99) playerFrags = 99;
+
+    var updatePlayerStatisticsRequest = { PlayFabId: currentPlayerId, Statistics: [
+        { StatisticName: "Matches", Value: 1 },
+        { StatisticName: "Laurels", Value: playerLaurel },
+        { StatisticName: "Frags", Value: playerFrags },
+        { StatisticName: "Deaths", Value: args.Deaths },
+        { StatisticName: "MaxStars", Value: roundStars }
+        ]
+    };
+
+    server.UpdatePlayerStatistics(updatePlayerStatisticsRequest);
+
+    return "Record was success";
+}
+
+
+var NEXT_LEVEL_INCREASE_POINTS = 500; // SEE TITLE DATA!
+
+handlers.CheckNewLevel = function(args) {
+
+    var playerMatchStars = 0;
+    var playerLevelStars = 0;
+    var playerLevelStarsLimit = 0;
+
+	var GetUserReadOnlyDataRequest = {
+        "PlayFabId": currentPlayerId,
+        "Keys": [ ROUND_STARS_KEY, LEVEL_STARS_KEY, LEVEL_STARS_LIMIT_KEY ]
+    }; 
+    
+    var GetUserReadOnlyDataResponse = server.GetUserReadOnlyData(GetUserReadOnlyDataRequest);
+
+    if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(ROUND_STARS_KEY))
+    {
+    	playerMatchStars = parseInt(GetUserReadOnlyDataResponse.Data[ROUND_STARS_KEY].Value);
+    }
+
+    if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(LEVEL_STARS_KEY))
+    {
+    	playerLevelStars = parseInt(GetUserReadOnlyDataResponse.Data[LEVEL_STARS_KEY].Value);
+    }
+
+    if(GetUserReadOnlyDataResponse.Data.hasOwnProperty(LEVEL_STARS_LIMIT_KEY))
+    {
+    	playerLevelStarsLimit = parseInt(GetUserReadOnlyDataResponse.Data[LEVEL_STARS_LIMIT_KEY].Value);
+    }
+    else
+    {
+        playerLevelStarsLimit = LEVEL_STARS_LIMIT_VALUE;
+    }
+
+    var playerLevel = 0;
+
+    var playerStats = server.GetPlayerStatistics({PlayFabId: currentPlayerId}).Statistics;
+
+    for (var i = 0; i < playerStats.length; i++)
+    {
+        if (playerStats[i].StatisticName === "Level") playerLevel = playerStats[i].Value;
+    }
+
+    var playerStarsSumUp = playerMatchStars + playerLevelStars;
+
+    var playerStarsFromUpperLevel = playerStarsSumUp - playerLevelStarsLimit;
+
+    if (playerStarsFromUpperLevel >= 0)
+    {
+        playerLevel++;
+    	levelRewardItems = GrantLevelReward(playerLevel);
+
+        var updatePlayerStatisticsRequest = { PlayFabId: currentPlayerId, Statistics: [ { StatisticName: "Level", Value: playerLevel } ] };
+
+        server.UpdatePlayerStatistics(updatePlayerStatisticsRequest);
+
+        playerLevelStarsLimit = playerLevelStarsLimit + NEXT_LEVEL_INCREASE_POINTS;
+        
+        if(playerStarsFromUpperLevel > playerLevelStarsLimit) playerStarsFromUpperLevel = playerLevelStarsLimit - 1;
+
+        playerLevelStars = playerStarsFromUpperLevel;
+    }
+    else
+    {
+        playerLevelStars = playerStarsSumUp;
+    }
+
+    var UpdateUserReadOnlyDataRequest = 
+    {
+        "PlayFabId": currentPlayerId,
+        "Data": {},
+        "Permission": "Private"
+    };
+
+    UpdateUserReadOnlyDataRequest.Data[ROUND_STARS_KEY] = 0;
+    UpdateUserReadOnlyDataRequest.Data[LEVEL_STARS_KEY] = playerLevelStars;
+    UpdateUserReadOnlyDataRequest.Data[LEVEL_STARS_LIMIT_KEY] = playerLevelStarsLimit;
+    
+    server.UpdateUserReadOnlyData(UpdateUserReadOnlyDataRequest);
+
+    return levelRewardItems;
+}
+
+function GrantLevelReward(level)
+{
+    var rewardCommon = REWARD_LEVEL_ID;
+
+    var rewardIds = [ rewardCommon ];
+
+    if (level % 4 === 0)
+    {
+        rewardIds = [ REWARD_LEVEL_ID, REWARD_LEVEL_ID_UNCOMMON ];
+    }
+
+    var GrantItemsToUserRequest = 
+    {
+        "CatalogVersion" : REWARD_LEVEL_CATALOG_VERSION,
+        "PlayFabId" : currentPlayerId,
+        "ItemIds" : rewardIds
+    };
+
+    var GrantItemsToUserResult = server.GrantItemsToUser(GrantItemsToUserRequest);
+    
+    return GrantItemsToUserResult.ItemGrantResults;
+}
+
+function CheckInventoryItems(itemIds)
+{
+    var inventoryItems = GetPlayerInventory();
+    
+    var itemIdsCheched = [];
+    
+    for(var index in inventoryItems)
+    {
+        var inventoryItem = inventoryItems[index];
+        
+        for(var itemId of itemIds)
+        {
+            if(itemId == inventoryItem.ItemId)
+            {
+                itemIdsCheched.push(inventoryItem);
+            }
+        }
+    }
+    
+    return itemIdsCheched;
 }
